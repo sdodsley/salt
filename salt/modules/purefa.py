@@ -72,6 +72,7 @@ __docformat__ = 'restructuredtext en'
 
 VERSION = '1.0.0'
 USER_AGENT_BASE = 'Salt'
+QOS_API_VERSION = '1.17'
 
 __virtualname__ = 'purefa'
 
@@ -137,6 +138,52 @@ def _get_system():
     except Exception:
         raise CommandExecutionError('Pure Storage FlashArray authentication failed.')
     return system
+
+
+def _human_to_bytes(size):
+    """Given a human-readable byte string (e.g. 2G, 30M),
+       return the number of bytes.  Will return 0 if the argument has
+       unexpected form.
+    """
+    bytes = size[:-1]
+    unit = size[-1]
+    if bytes.isdigit():
+        bytes = int(bytes)
+        if unit == 'P':
+            bytes *= 1125899906842624
+        elif unit == 'T':
+            bytes *= 1099511627776
+        elif unit == 'G':
+            bytes *= 1073741824
+        elif unit == 'M':
+            bytes *= 1048576
+        elif unit == 'K':
+            bytes *= 1024
+        else:
+            bytes = 0
+    else:
+        bytes = 0
+    return bytes
+
+
+def _human_to_real(iops):
+    """Given a human-readable IOPs string (e.g. 2K, 30M),
+       return the real number.  Will return 0 if the argument has
+       unexpected form.
+    """
+    digit = iops[:-1]
+    unit = iops[-1]
+    if digit.isdigit():
+        digit = int(digit)
+        if unit == 'M':
+            digit *= 1000000
+        elif unit == 'K':
+            digit *= 1000
+        else:
+            digit = 0
+    else:
+        digit = 0
+    return digit
 
 
 def _get_volume(name, array):
@@ -329,26 +376,55 @@ def volume_create(name, size=None):
     size : string
         if specificed capacity of volume. If not specified default to 1G.
         Refer to Pure Storage documentation for formatting rules.
-
+    qos_iops : str
+        If specificed the IOPs limit for the volume. Use value or K or M.
+        K will mean 1000, M will mean 1000000
+    qos_bw : str
+        if specified bandwidth limit for the volume. Us value M or G.
+        M will set MB/s, G will set GB/s
     CLI Example:
 
     .. code-block:: bash
 
         salt '*' purefa.volume_create foo
-        salt '*' purefa.volume_create foo size=10T
+        salt '*' purefa.volume_create foo size=10T qos_iops=100K qos_bw=25M
 
     '''
     if len(name) > 63:
         name = name[0:63]
     array = _get_system()
+    api_version = array._list_available_rest_versions()
     if _get_volume(name, array) is None:
         if size is None:
             size = '1G'
-        try:
-            array.create_volume(name, size)
-            return True
-        except purestorage.PureError:
-            return False
+        if QOS_API_VERSION in api_version:
+            valid = False
+            iops = bwidth = 0
+            if qos_iops:
+                iops = int(_human_to_real(qos_iops))
+                if 100000000 >= iops >= 100:
+                    valid = True
+            if qos_bw:
+                bwidth = int(_human_to_bytes(qos_bw))
+                if 549755813888 >= bwidth >= 1048576:
+                    valid = True
+            if valid:
+                try:
+                    array.create_volume(name, size,
+                                        iops_limit=iops,
+                                        bandwidth_limit=bwidth)
+                    return True
+                except purestorage.PureError:
+                    return False
+            else:
+                return False
+        else:
+            iops = bwidth = 0
+            try:
+                array.create_volume(name, size)
+                return True
+            except purestorage.PureError:
+                return False
     else:
         return False
 
